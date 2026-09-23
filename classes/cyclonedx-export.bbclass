@@ -995,6 +995,11 @@ def export_cyclonedx(d):
             existing_component = next((sbom_pkg for sbom_pkg in sbom["components"]
                                        if sbom_pkg["cpe"] == pn_pkg["cpe"]), None)
             if existing_component:
+                # Cross-recipe CPE duplicate (e.g. gcc-source/gcc-runtime/libgcc all emit
+                # cpe:...:gcc): this recipe's VEX entries still reference the skipped
+                # component, so record the redirect or they dangle in the image VEX.
+                if pn_pkg.get("bom-ref") and existing_component.get("bom-ref"):
+                    global_bom_ref_dedup_map.setdefault(pn_pkg["bom-ref"], existing_component["bom-ref"])
                 if pkg in image_install_recipes:
                     existing_ref = existing_component.get("bom-ref")
                     if existing_ref:
@@ -1123,6 +1128,36 @@ def export_cyclonedx(d):
         "dependsOn": directly_installed_refs
     }
     sbom["dependencies"].insert(0, root_dep_entry)
+
+    import json
+    # Redirect VEX affects that point at a deduplicated component to its canonical
+    # bom-ref, then merge entries that now share an id (union of affects).
+    def _canonical(ref):
+        seen = set()
+        while ref in global_bom_ref_dedup_map and ref not in seen:
+            seen.add(ref)
+            ref = global_bom_ref_dedup_map[ref]
+        return ref
+
+    merged_vulns = {}
+    for vuln in vex["vulnerabilities"]:
+        affects = []
+        for affect in vuln.get("affects", []):
+            ref = affect.get("ref", "")
+            prefix, sep, frag = ref.partition("#")  # bom-refs may themselves contain '#'
+            if sep:
+                affect = dict(affect, ref=f"{prefix}#{_canonical(frag)}")
+            if affect not in affects:
+                affects.append(affect)
+        vuln["affects"] = affects
+        # Merge only when the analysis matches; differing verdicts stay separate entries.
+        key = (vuln["id"], json.dumps(vuln.get("analysis", {}), sort_keys=True))
+        existing = merged_vulns.get(key)
+        if existing is None:
+            merged_vulns[key] = vuln
+        else:
+            existing["affects"].extend(a for a in affects if a not in existing["affects"])
+    vex["vulnerabilities"] = list(merged_vulns.values())
 
     # Replace SBOM serial placeholder in VEX vulnerabilities
     # This must be done after all vulnerabilities are collected to ensure each image
