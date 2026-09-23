@@ -987,7 +987,7 @@ def export_cyclonedx(d):
             if pkg not in alias_map:
                 alias_map[pkg] = pn_pkg["name"]
 
-    for pkg in recipes:
+    for pkg in sorted(recipes):  # stable CPE-dedup winner across builds
         pn_list = copy.deepcopy(pn_lists[pkg])
 
         for pn_pkg in pn_list["pkgs"]:
